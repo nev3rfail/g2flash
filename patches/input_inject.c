@@ -21,7 +21,10 @@
  * spec gave: LEFT reaches the master in one hop and does not depend on a peer
  * ACK. RIGHT would also work, one UART round trip later. BOTH would make the
  * master dispatch TWICE and double-advance the UI, so the side guard below
- * turns a mis-addressed record into a visible NACK instead of a double scroll.
+ * drops the copy that lands on the right lens. The guard is silent: it ACKs
+ * like every other path here (see the block above cfw_inject_input), so a
+ * mis-addressed record is invisible on the wire and is caught only by watching
+ * the display.
  *
  * Values are whitelisted, not passed through: PRESS/RELEASE (13/14) on the
  * temple bars latch inpm_both_long_press_active(), which rejects ALL input -
