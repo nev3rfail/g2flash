@@ -379,13 +379,32 @@ static int image_worker(const uint8_t *src, uint32_t size, uint8_t origin) {
      * limiter cannot help: it bounds how often the call is entered, not how
      * long one entry takes.
      *
-     * Nothing in the locked region applies to it: injection is not a drawing
-     * op — no staging, no present, no shadow or rect-list state. The size
-     * guard mirrors the panel_queue branch below (src[0] is read only when
-     * size is non-zero) and the mode is derived exactly as image_dispatch
-     * derives it, mask included. */
-    if (size && (cfw_message_type)(src[0] & CFW_MSG_TYPE_MASK) == CFW_MSG_INJECT_INPUT)
+     * Nothing else in the locked region applies to it: injection is not a
+     * drawing op — no staging, no present, no shadow or rect-list state, no
+     * display gate. The ONE thing it does still need is the keepalive reset,
+     * which is why it is repeated below. The size guard mirrors the
+     * panel_queue branch below (src[0] is read only when size is non-zero) and
+     * the mode is derived exactly as image_dispatch derives it, mask
+     * included. */
+    if (size && (cfw_message_type)(src[0] & CFW_MSG_TYPE_MASK) == CFW_MSG_INJECT_INPUT) {
+        /* Yes, a keepalive reset outside the locked region, and it is deliberate.
+         * FW_KEEPALIVE_RESET is the first statement of image_worker_locked, so
+         * before the mode-32 dispatch moved up here EVERY injected event kicked
+         * the EvenHub heartbeat counter; returning early skipped it and made
+         * injection the only CFW message that does not. That matters because
+         * driving stock EvenHub apps is a stated goal of this feature and the
+         * injecting client is not the stock Even app: it sends no sid-0x0c
+         * heartbeats and (section 4.6 of the spec) takes no Faceclaw lease, so
+         * the injection records were the only thing holding the session open.
+         * Without this the EvenHub heartbeat-timeout teardown fires at 900
+         * auto-reflash ticks underneath an operator who is actively navigating.
+         *
+         * It is safe where C1 forbids SendDataToBoth to be: the leaf at
+         * 0x004f7cdf takes no arguments, takes no lock, cannot block, and
+         * zeroes one global (0x20078454) that nothing here reads. */
+        FW_KEEPALIVE_RESET();
         return cfw_inject_input(src, size);
+    }
 
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return -1;

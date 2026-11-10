@@ -99,6 +99,21 @@ int cfw_inject_input(const uint8_t *src, uint32_t srclen)
     customCfwContext *ctx = faceclaw_context_if_valid();
     if (ctx == 0) return 0;
 
+    /* THE FLOOR IS NOT HARD, and the next person must not assume it is. This
+     * read-compare-write is not atomic, and since the mode-32 dispatch moved
+     * out of image_mutex (zlib_glue.c, finding C1) nothing serialises it. The
+     * two ingress paths are separate tasks - BLE receive via
+     * cfw_receive_packet and inter-arm bridge receive via
+     * cfw_message_bridge_received, both landing in cfw_message_process with
+     * their own streams - so a phone writing to both arms at once can have two
+     * records read the same old tick, both pass this test and both send. The
+     * excess is bounded at exactly 2x (one per ingress path), i.e. an
+     * effective 10 ms floor, not unbounded. Accepted deliberately: 10 ms is
+     * still far slower than the queue the floor guards, and the phone is
+     * required to pace itself anyway (spec section 6.2). If it ever needs to
+     * be hard, make it an __atomic_compare_exchange_n on inject_last_tick -
+     * zlib_glue.c's image_mutex creation already shows the idiom in this
+     * tree. Recorded in SPEC-input-injection.md section 5.3. */
     uint32_t now = FW_MS_TICK;
     if (ctx->inject_last_tick != 0u &&
         (uint32_t)(now - ctx->inject_last_tick) < INJECT_MIN_INTERVAL_MS)
