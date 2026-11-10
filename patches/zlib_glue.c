@@ -171,6 +171,10 @@ typedef enum {
      * display state was (see evenhub_enter.c). Idempotent; replaces the phone's
      * stock CreateStartUpPage, which never ACKs if the page already exists. */
     CFW_MSG_ENTER_EVENHUB = 31,
+    /* [32][dev u8][event_id u32 LE][diffx u8][speed u8] inject a stock input
+     * event (message 0x108) so the phone can drive the stock UI with no
+     * ring and nobody touching a temple. See input_inject.c. */
+    CFW_MSG_INJECT_INPUT = 32,
 } cfw_message_type;
 
 /* The high bit historically selected separate lens coordinates in bbox/copy messages.
@@ -283,6 +287,7 @@ static void als_cleanup_session(void);   /* als_sensor.c (same TU): passive ALS 
 int ring_battery_control(const uint8_t *src, uint32_t srclen); /* mode 17 */
 int als_control(const uint8_t *src, uint32_t srclen); /* als_sensor.c: mode 16 */
 int evenhub_enter_control(const uint8_t *src, uint32_t srclen); /* evenhub_enter.c: mode 31 */
+int cfw_inject_input(const uint8_t *src, uint32_t srclen); /* input_inject.c: mode 32 */
 
 static int decode_image_rle(const uint8_t *src, uint32_t size, uint8_t *base, uint32_t stride, uint32_t rowbytes, uint32_t rows);
 static void present_composition(uint32_t w, uint32_t h, cfw_rectlist *rl);
@@ -432,6 +437,9 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, cfw_rectlist *rl)
     cfw_message_type mode = (cfw_message_type)(src[0] & CFW_MSG_TYPE_MASK);
 
     if (mode == CFW_MSG_BRIGHTNESS) return brightness_control(src, srclen);
+
+    /* Not a drawing op: no staging, no present. */
+    if (mode == CFW_MSG_INJECT_INPUT) return cfw_inject_input(src, srclen);
 
     /* A new staged frame must not leak through an animation redraw before
      * its PRESENT. All of these paths execute under image_mutex. */
