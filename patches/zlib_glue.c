@@ -363,6 +363,30 @@ static void cfw_animation_tick(void *arg) {
     CFW_IMAGE_MUTEX_GIVE(mutex);
 }
 static int image_worker(const uint8_t *src, uint32_t size, uint8_t origin) {
+    /* Mode 32 is handled HERE, before the image mutex is lazily created and
+     * before it is taken, and this is now its ONLY dispatch path — the line
+     * that used to sit in image_dispatch was removed, so there is exactly one.
+     *
+     * Why it must not be inside the lock: cfw_inject_input calls stock
+     * SendDataToBoth, which is not a non-blocking enqueue. It contains two
+     * CommonMalloc retry loops (ten attempts with a doubling delay, up to
+     * 1023 ms each) and a 2000 ms blocking audio_cmsis_queue_put — roughly 4 s
+     * worst case for one call. The mutex below is taken with 0xffffffffu, i.e.
+     * wait forever, inside the synchronous TPL receive handler, so a single
+     * slow send would stall every inbound CFW record on both ingress paths,
+     * make cfw_animation_tick miss its zero-timeout take and drop frames, and
+     * pin the stream parser's receive buffer for the whole duration. The rate
+     * limiter cannot help: it bounds how often the call is entered, not how
+     * long one entry takes.
+     *
+     * Nothing in the locked region applies to it: injection is not a drawing
+     * op — no staging, no present, no shadow or rect-list state. The size
+     * guard mirrors the panel_queue branch below (src[0] is read only when
+     * size is non-zero) and the mode is derived exactly as image_dispatch
+     * derives it, mask included. */
+    if (size && (cfw_message_type)(src[0] & CFW_MSG_TYPE_MASK) == CFW_MSG_INJECT_INPUT)
+        return cfw_inject_input(src, size);
+
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return -1;
     uint32_t mutex = __atomic_load_n(&ctx->image_mutex, __ATOMIC_ACQUIRE);
@@ -438,8 +462,10 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, cfw_rectlist *rl)
 
     if (mode == CFW_MSG_BRIGHTNESS) return brightness_control(src, srclen);
 
-    /* Not a drawing op: no staging, no present. */
-    if (mode == CFW_MSG_INJECT_INPUT) return cfw_inject_input(src, srclen);
+    /* CFW_MSG_INJECT_INPUT (32) is deliberately NOT dispatched here. It is
+     * handled in image_worker before the image mutex is taken, because the
+     * stock send it performs can block for seconds; see the comment there.
+     * Everything below this point runs under that mutex. */
 
     /* A new staged frame must not leak through an animation redraw before
      * its PRESENT. All of these paths execute under image_mutex. */

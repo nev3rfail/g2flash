@@ -13,8 +13,9 @@
  * send-listener once the peer ACKs with 0x0a (send_begin_type1.c:63-75, whose
  * bl resolves to 0x00465f10 - the function Faceclaw already hooks as
  * CFW_STOCK_BRIDGE_RECEIVE). So the comment in message_transport.c:9 about a
- * local echo is right, and SPEC-input-injection.md section 8.1 was wrong to call
- * this peer-directed.
+ * local echo is right. SPEC-input-injection.md section 8.1 said the opposite in
+ * v3 and was corrected in v4; it now agrees with this comment, so a reader
+ * following the citation should find agreement, not a dispute.
  *
  * The record is still addressed to the LEFT lens, for better reasons than the
  * spec gave: LEFT reaches the master in one hop and does not depend on a peer
@@ -31,7 +32,7 @@
  * whose queue-full path masks interrupts, faults deliberately and spins. Stock
  * never reaches it because events come from a finger; a phone over BLE would.
  *
- * Deliberately NOT gated on cfw_fb_lease_active(): gesture_fwd.c:157 takes that
+ * Deliberately NOT gated on cfw_fb_lease_active(): gesture_fwd.c:155-157 takes that
  * lease because it is driving Faceclaw's framebuffer. We are driving the STOCK
  * UI, so the lease must not be required and must not be taken.
  */
@@ -51,13 +52,37 @@ typedef int32_t (*send_both_fn)(uint16_t type, const void *payload,
                                 uint32_t length, void *done_cb);
 #define FW_SEND_DATA_TO_BOTH ((send_both_fn)0x0046a861u)
 
+/* EVERY return from this function is 0, including every refusal, and that is
+ * load-bearing rather than sloppy.
+ *
+ * The private transport has no benign "rejected" signal. Any non-zero return
+ * from the dispatch chain reaches cfw_message_complete, which does
+ * `cfw_inflate_reset(stream); stream->context_valid = 0;` with the comment
+ * "only an explicit record reset can recover" (message_transport.c). The flag
+ * is sticky and per ingress lens, so one NACK kills the whole sid-0xf0 stream
+ * for that lens - injection records and Faceclaw image traffic alike - until a
+ * record carrying CFW_MESSAGE_RESET_CONTEXT arrives. A NACK is therefore not a
+ * cheap "no"; it is a transport kill.
+ *
+ * Refusal here is a DESIGNED, ROUTINE outcome: the 20 ms rate limit exists
+ * precisely so that over-rate injections are dropped, and a phone holding a
+ * d-pad down will hit it constantly. Handing a routine drop the power to take
+ * the transport down trades a bounded, invisible miss for an unbounded, total
+ * one. So mode 32 ACKs whatever it does with the record.
+ *
+ * The cost, stated plainly: for mode 32 an ACK means RECEIVED, not INJECTED.
+ * That suspends this project's "judge a send by its ack" rule for this one
+ * message. The phone must pace itself above the 20 ms floor and judge an
+ * injection by watching the display, never by the reply code. Written into
+ * SPEC-input-injection.md sections 4.4, 5.3 and 8 so it is not rediscovered.
+ */
 int cfw_inject_input(const uint8_t *src, uint32_t srclen)
 {
-    if (src == 0 || srclen < 8u) return -1;
+    if (src == 0 || srclen < 8u) return 0;
 
-    /* Only the left lens injects. Mirrors gesture_fwd.c:163. Without this, a
-     * record addressed to BOTH lenses reaches the master twice. */
-    if (FW_SIDE_ID() != 2u) return -1;
+    /* Only the left lens injects. Mirrors gesture_fwd.c:163-164. Without this,
+     * a record addressed to BOTH lenses reaches the master twice. */
+    if (FW_SIDE_ID() != 2u) return 0;
 
     uint32_t dev   = src[1];
     uint32_t event = (uint32_t)src[2]
@@ -65,16 +90,16 @@ int cfw_inject_input(const uint8_t *src, uint32_t srclen)
                    | ((uint32_t)src[4] << 16)
                    | ((uint32_t)src[5] << 24);
 
-    if (dev != 0u && dev != 1u && dev != 4u) return -1;
-    if (event == 2u || event > 5u) return -1;      /* {0,1,3,4,5} only */
+    if (dev != 0u && dev != 1u && dev != 4u) return 0;
+    if (event == 2u || event > 5u) return 0;      /* {0,1,3,4,5} only */
 
     customCfwContext *ctx = faceclaw_context_if_valid();
-    if (ctx == 0) return -1;
+    if (ctx == 0) return 0;
 
     uint32_t now = FW_MS_TICK;
     if (ctx->inject_last_tick != 0u &&
         (uint32_t)(now - ctx->inject_last_tick) < INJECT_MIN_INTERVAL_MS)
-        return -1;
+        return 0;
     ctx->inject_last_tick = (now == 0u) ? 1u : now;
 
     uint32_t ev[3];
@@ -87,6 +112,23 @@ int cfw_inject_input(const uint8_t *src, uint32_t srclen)
      * straight off the wire and NOT bounded by the record size
      * (service_input_manager.c:288-295). Any path that lets a caller-supplied
      * length reach here smashes the master's stack. */
+    /* The return value is DELIBERATELY discarded, and the discard is not free.
+     * Stock SendDataToBoth returns -1 on a null queue pointer, on either
+     * CommonMalloc giving up after ten retries, and on audio_cmsis_queue_put
+     * failing after its 2000 ms wait (display_input_event_send.c) - on each of
+     * those the event never leaves this lens. Propagating that into a NACK is
+     * what the obvious reading asks for, and it is exactly what the comment
+     * above this function forbids: it would hand a transient, routine send
+     * failure the power to zero context_valid and kill the sid-0xf0 stream for
+     * this lens until a RESET_CONTEXT record arrives. A dropped event is
+     * recoverable by sending another; a dead transport is not.
+     *
+     * What the discard costs: a failed send ACKs like a successful one, so the
+     * phone's model of the stock UI can silently drift from what the lenses
+     * show. The rate limiter has also already been advanced above, so the
+     * window is consumed either way. The mitigation is not in the firmware -
+     * it is the operator watching the display, which is what every acceptance
+     * criterion in the spec is written to require. */
     (void)FW_SEND_DATA_TO_BOTH((uint16_t)INPM_EVENT_MSG_ID, ev, 12u, 0);
     return 0;
 }
