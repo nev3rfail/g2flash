@@ -93,8 +93,39 @@ int cfw_inject_input(const uint8_t *src, uint32_t srclen)
                    | ((uint32_t)src[4] << 16)
                    | ((uint32_t)src[5] << 24);
 
-    if (dev != 0u && dev != 1u && dev != 4u) return 0;
-    if (event == 2u || event > 5u) return 0;      /* {0,1,3,4,5} only */
+    /* NO dev OR event WHITELIST. Both are passed through, deliberately.
+     *
+     * The first version of this file allowed dev {0,1,4} and event {0,1,3,4,5},
+     * citing the inpm_both_long_press latch that rejects all input - the
+     * physical bars included - and toggles persisted silent mode. The hazard
+     * is real; the ban was thirty times wider than it, and it cost a reflash
+     * plus the ability to inject a faithful gesture STREAM. A real hold is
+     * PRESS, LONG_PRESS, RELEASE; with only the middle event the stock UI gets
+     * an input no finger can produce.
+     *
+     * Every consumer downstream of SendDataToBoth already guards itself, which
+     * is what makes a guard here redundant rather than merely annoying:
+     *
+     *   inpm_event_id_name_4c5892 / inpm_dev_type_name_4c58ee
+     *       both end in `default: return name_unknown` - no NULL into a %s,
+     *       no table indexed by the value.
+     *   INPM_TouchTracepoint_4c5c6e
+     *       `index = inpm_dev_type_index_4c5c4c(dev_type); if (index < 0)
+     *       return;` - an unknown dev never reaches the tick arrays.
+     *   INPM_BothLongPressEventProcess_4c5a58
+     *       acts only on INPM_DEV_LEFT and INPM_DEV_RIGHT; everything else
+     *       hits `else { return; }`.
+     *
+     * The one combination that does bite, written down rather than banned:
+     * PRESS (13) on dev 0 AND dev 1 within 2000 ms arms the both-long-press
+     * check, which after a further 1000 ms rejects all input - including the
+     * temple bars - and toggles silent mode, which persists. It is reachable
+     * only by meaning it, and it is recoverable from the phone by injecting
+     * RELEASE (14) on both devs, which zeroes both ticks.
+     *
+     * The length handed to SendDataToBoth below stays the literal 12. That is
+     * the invariant that matters here and it is not wire-controlled.
+     */
 
     customCfwContext *ctx = faceclaw_context_if_valid();
     if (ctx == 0) return 0;
